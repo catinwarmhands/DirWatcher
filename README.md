@@ -32,6 +32,6 @@ watcher.setCallback([](ciwh::FileActionType type, const char* filename) {
 4. Run: `watcher.start();`
 5. (Optional, will be called in destructor) Stop: `watcher.stop();`
 
-You can chande dir via `setDir(const char* path)` method, set recursive mode via `setRecursive(bool b)` method. If wather was running, it will restart.
+You can chande dir via `setDir(const char* path)` method, set recursive mode via `setRecursive(bool b)` method. If watcher was running, it will restart.
 
 Getters are: `bool isRecursive()`, `bool isRunning()`, `const char* const getDir()`
