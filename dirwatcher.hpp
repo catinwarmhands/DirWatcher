@@ -23,7 +23,7 @@
 //     `DIRWATCHER_MESSAGE_BUFFER_SIZE` is message buffer size (default is 1024 bytes)
 //  1. `#include "path/to/this/file/dirwatcher.hpp"`
 //  2. Create object: `ciwh::DirWatcher watcher`; 
-//     Defaults: dir is `.`, non-recursive (watch without subfolders)
+//     Defaults: dir is `.`, non-recursive (dont watch subfolders)
 //  3. Set callback:  `
 //     watcher.setCallback([](ciwh::FileActionType type, const char* filename) {
 //     	   /*your code here*/
@@ -57,7 +57,7 @@
 #endif
 
 #ifndef DIRWATCHER_DEFAULT_CALLBACK_MESSAGE
-	#define DIRWATCHER_DEFAULT_CALLBACK_MESSAGE   printf("Default DirWatcher callback: action '%d', filename '%s'", (int)fat, filename)
+	#define DIRWATCHER_DEFAULT_CALLBACK_MESSAGE   printf("Default DirWatcher callback: action '%d', filename '%s'", (int)type, filename)
 #endif
 
 #ifndef DIRWATCHER_MESSAGE_BUFFER_SIZE
@@ -91,7 +91,7 @@ public:
 
 	DirWatcher() {
 		//setting default callback
-		callback = [](FileActionType fat, const char* filename) {
+		callback = [](FileActionType type, const char* filename) {
 			DIRWATCHER_DEFAULT_CALLBACK_MESSAGE;
 		};
 	}
