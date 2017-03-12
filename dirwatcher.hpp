@@ -22,7 +22,7 @@ Public domain
  * `DIRWATCHER_FAILED_CLOSE_HANDLE_ACTION` will be called if closing hanle failed, 
  * `DIRWATCHER_DEFAULT_CALLBACK_MESSAGE` will be inserted as code for default callback,
  * `DIRWATCHER_MESSAGE_BUFFER_SIZE` is message buffer size (default is 1024 bytes)
- * `DIRWATCHER_USE_STD_FUNCTION` if defined - will use std::function instead of function pointer for callback
+ * `DIRWATCHER_USE_STD_FUNCTION` if defined - will use `std::function` instead of function pointer for callback
 1. `#include "path/to/this/file/dirwatcher.hpp"`
 2. Create object: `ciwh::DirWatcher watcher`; 
  * Defaults: dir is `.`, non-recursive (dont watch subfolders)
@@ -44,7 +44,7 @@ Getters are: `bool isRecursive()`, `bool isRunning()`, `const char* const getDir
 #ifndef DIRWATCHER_HPP_
 #define DIRWATCHER_HPP_
 
-#if !defined(_WIN32) || !defined(_WIN64)
+#if !defined(_WIN32) && !defined(_WIN64)
 	#error DirWatcher only works on windows for now...
 #endif
 
@@ -65,7 +65,7 @@ Getters are: `bool isRecursive()`, `bool isRunning()`, `const char* const getDir
 #endif
 
 #ifndef DIRWATCHER_MESSAGE_BUFFER_SIZE
- 	#define DIRWATCHER_MESSAGE_BUFFER_SIZE 1024
+ 	#define DIRWATCHER_MESSAGE_BUFFER_SIZE 65535
 #endif
 
 #include <thread>
@@ -91,18 +91,23 @@ private:
 	std::thread th;
 	const char* dir = ".";
 	bool recursive = false;
-	bool isactive = false;
+	bool isrunning = false;
+	HANDLE events[2]; //[0] - file changed, [1] - thread should be terminated;
 
 	#ifdef DIRWATCHER_USE_STD_FUNCTION
 		std::function<void(FileActionType, const char*)> callback;
 	#else
 		void (*callback)(FileActionType, const char*);
 	#endif
+
 public:
 	DirWatcher(const DirWatcher& other) = delete;
 	auto operator=(const DirWatcher& other) = delete;
 
 	DirWatcher() {
+		events[0] = CreateEvent(NULL, FALSE, FALSE, NULL);
+		events[1] = CreateEvent(NULL, FALSE, FALSE, NULL);
+
 		//setting default callback
 		callback = [](FileActionType type, const char* filename) {
 			DIRWATCHER_DEFAULT_CALLBACK_MESSAGE;
@@ -110,18 +115,18 @@ public:
 	}
 
 	bool isRecursive() { return recursive; }
-	bool isRunning()   { return isactive;  }
+	bool isRunning()   { return isrunning; }
 	const char* const getDir() {return dir;}
 
 	void setRecursive(bool r) {
-		bool wasRunning = isactive;
+		bool wasRunning = isrunning;
 		stop();
 		recursive = r;
 		if (wasRunning) start();
 	}
 
 	void setDir(const char* d) {
-		bool wasRunning = isactive;
+		bool wasRunning = isrunning;
 		stop();
 		dir = d;
 		if (wasRunning) start();
@@ -134,28 +139,31 @@ public:
 			void (*func)(FileActionType, const char*)
 		#endif
 	) {
-		bool wasRunning = isactive;
+		bool wasRunning = isrunning;
 		stop();
 		callback = func;
 		if (wasRunning) start();
 	}
 
 	void stop() {
+		isrunning = false;
 		if (th.joinable()) {
+			SetEvent(events[1]);
 			th.join();
-			BOOL success = FindCloseChangeNotification(hDir);
+
+			BOOL success = CloseHandle(hDir);
 			if (success == FALSE) {
 				DIRWATCHER_FAILED_CLOSE_HANDLE_ACTION;
 			}
 		}
-		isactive = false;
 	}
 
 	void start() {
-		if (isactive) {
+		if (isrunning) {
 			stop();
-			isactive = false;
 		}
+		isrunning = true;
+
 		hDir = CreateFile( 
 			dir,                                // pointer to the file name
 			FILE_LIST_DIRECTORY,                // access (read/write) mode
@@ -163,7 +171,7 @@ public:
 			FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, // share mode
 			NULL,                               // security descriptor
 			OPEN_EXISTING,                      // how to create
-			FILE_FLAG_BACKUP_SEMANTICS,         // file attributes
+			FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,         // file attributes
 			NULL                                // file with attributes to copy
 		);
 
@@ -172,53 +180,66 @@ public:
 		}
 
 		th = std::thread([&](){
+			OVERLAPPED stOverlapped;
+			ZeroMemory(&stOverlapped, sizeof(stOverlapped));
+
+			stOverlapped.hEvent = events[0];
+
 			TCHAR szBuffer[DIRWATCHER_MESSAGE_BUFFER_SIZE];
 			DWORD BytesReturned;
-			while(ReadDirectoryChangesW(
-				hDir,                          // handle to directory
-				&szBuffer,                     // read results buffer
-				sizeof(szBuffer),              // length of buffer
-				(recursive ? TRUE : FALSE),    // monitoring option
-				FILE_NOTIFY_CHANGE_SECURITY |
-				FILE_NOTIFY_CHANGE_CREATION |
-				FILE_NOTIFY_CHANGE_LAST_WRITE |
-				FILE_NOTIFY_CHANGE_SIZE |
-				FILE_NOTIFY_CHANGE_ATTRIBUTES |
-				FILE_NOTIFY_CHANGE_DIR_NAME |
-				FILE_NOTIFY_CHANGE_FILE_NAME,  // filter conditions
-				&BytesReturned,                // bytes returned
-				NULL,                          // overlapped buffer
-				NULL                           // completion routine
-				)
-			) {
-				DWORD dwOffset = 0;
-				FILE_NOTIFY_INFORMATION* pInfo = NULL;
-				do {
-					// Get a pointer to the first change record...
-					pInfo = (FILE_NOTIFY_INFORMATION*)&szBuffer[dwOffset];
-					FileActionType fat;
-					switch (pInfo->Action) {
-						case FILE_ACTION_ADDED:            fat = FileActionType::ADDED;            break; 
-						case FILE_ACTION_REMOVED:          fat = FileActionType::REMOVED;          break; 
-						case FILE_ACTION_MODIFIED:         fat = FileActionType::MODIFIED;         break; 
-						case FILE_ACTION_RENAMED_OLD_NAME: fat = FileActionType::RENAMED_OLD_NAME; break; 
-						case FILE_ACTION_RENAMED_NEW_NAME: fat = FileActionType::RENAMED_NEW_NAME; break;
-					}
 
-					// ReadDirectoryChangesW processes filenames in Unicode. We will convert them to a TCHAR format...
-					TCHAR szFileName[MAX_PATH] = {0};
-					WideCharToMultiByte(CP_ACP, NULL, pInfo->FileName, pInfo->FileNameLength, szFileName, sizeof(szFileName) / sizeof(TCHAR), NULL, NULL);
-					szFileName[pInfo->FileNameLength / 2] = 0;
+			while (isrunning) {
+				ReadDirectoryChangesW(
+					hDir,                          // handle to directory
+					&szBuffer,                     // read results buffer
+					sizeof(szBuffer),              // length of buffer
+					(recursive ? TRUE : FALSE),    // monitoring option
+					FILE_NOTIFY_CHANGE_SECURITY |
+					FILE_NOTIFY_CHANGE_CREATION |
+					FILE_NOTIFY_CHANGE_LAST_WRITE |
+					FILE_NOTIFY_CHANGE_SIZE |
+					FILE_NOTIFY_CHANGE_ATTRIBUTES |
+					FILE_NOTIFY_CHANGE_DIR_NAME |
+					FILE_NOTIFY_CHANGE_FILE_NAME,  // filter conditions
+					&BytesReturned,                // bytes returned
+					&stOverlapped,                 // overlapped buffer
+					NULL                           // completion routine
+				);
+				
+				DWORD dwWaitRes = WaitForMultipleObjects(2, events, FALSE, INFINITE);
 
-					callback(fat, szFileName);
+				//terminating event was raised
+				if (dwWaitRes == WAIT_OBJECT_0 + 1) {
+					return;
+				}
 
-					// More than one change may happen at the same time. Load the next change and continue...
-					dwOffset += pInfo->NextEntryOffset;
-				} while (pInfo->NextEntryOffset != 0);
+				DWORD dwBytesRead = 0;
+				PFILE_NOTIFY_INFORMATION pInfo = NULL;
+				GetOverlappedResult(hDir, &stOverlapped, &dwBytesRead, FALSE);
+
+				pInfo = (PFILE_NOTIFY_INFORMATION)(&szBuffer);
+
+				DWORD fileNameLength = pInfo->FileNameLength / sizeof(WCHAR);
+
+				char* szFileName = new char[fileNameLength+1];
+				memset(szFileName, 0, fileNameLength+1);
+				
+				WideCharToMultiByte(CP_OEMCP, NULL, pInfo->FileName, pInfo->FileNameLength / sizeof(WCHAR), szFileName, fileNameLength / sizeof(TCHAR), NULL, NULL);
+
+				FileActionType fat;
+				switch (pInfo->Action) {
+					case FILE_ACTION_ADDED:            fat = FileActionType::ADDED;            break; 
+					case FILE_ACTION_REMOVED:          fat = FileActionType::REMOVED;          break; 
+					case FILE_ACTION_MODIFIED:         fat = FileActionType::MODIFIED;         break; 
+					case FILE_ACTION_RENAMED_OLD_NAME: fat = FileActionType::RENAMED_OLD_NAME; break; 
+					case FILE_ACTION_RENAMED_NEW_NAME: fat = FileActionType::RENAMED_NEW_NAME; break;
+				}
+
+				callback(fat, szFileName);
+
+				delete[] szFileName;
 			}
 		});
-
-		isactive = true;
 	}
 
 	~DirWatcher() {
